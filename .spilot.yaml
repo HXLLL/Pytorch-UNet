@@ -1,0 +1,10 @@
+image: milesial/unet
+
+setup: |
+  python3 --version
+
+run: |
+  python train.py
+
+profile: |
+  python train.py --epoch 1

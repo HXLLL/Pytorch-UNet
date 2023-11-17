@@ -13,7 +13,9 @@ from torch import optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
+import subprocess
 import wandb
+
 from evaluate import evaluate
 from unet import UNet
 from utils.data_loading import BasicDataset, CarvanaDataset
@@ -21,7 +23,33 @@ from utils.dice_score import dice_loss
 
 dir_img = Path('./data/imgs/')
 dir_mask = Path('./data/masks/')
-dir_checkpoint = Path('./checkpoints/')
+dir_checkpoint = Path('/app/output/checkpoint')
+cmd = 'mkdir -p ' + dir_checkpoint
+ret = subprocess.check_output(cmd, shell=True)
+
+def most_recent_weights(weights_folder):
+    """
+        return most recent created weights file
+        if folder is empty return empty string
+    """
+    weight_files = os.listdir(weights_folder)
+    if len(weight_files) == 0:
+        return ''
+
+    regex_str = r'([0-9]+)'
+
+    # sort files by epoch
+    weight_files = sorted(weight_files, key=lambda w: int(re.search(regex_str, w).groups()[0]))
+
+    return weight_files[-1]
+
+def last_epoch(weights_folder):
+    weight_file = most_recent_weights(weights_folder)
+    if not weight_file:
+       raise Exception('no recent weights were found')
+    resume_epoch = int(weight_file)
+
+    return resume_epoch
 
 
 def train_model(
@@ -81,11 +109,19 @@ def train_model(
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
 
+    resume_epoch = last_epoch(dir_checkpoint)
+
     # 5. Begin training
     for epoch in range(1, epochs + 1):
+        if epoch <= resume_epoch:
+            continue
+
+        checkpoint_dir = os.path.join(dir_checkpoint, f'{epoch}')
         model.train()
         epoch_loss = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
+            batch_index = 0
+
             for batch in train_loader:
                 images, true_masks = batch['image'], batch['mask']
 
@@ -158,17 +194,23 @@ def train_model(
                         except:
                             pass
 
-        if save_checkpoint:
-            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
-            state_dict = model.state_dict()
-            state_dict['mask_values'] = dataset.mask_values
-            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
-            logging.info(f'Checkpoint {epoch} saved!')
+                nb_iter += 1
+                wandb.log({
+                    "iteration": nb_iter, # 从训练开始到现在的总迭代轮数
+                    "trained_samples": batch_index * batch_size + len(images), # 在当前epoch中，已使用的数据个数
+                    "total_samples": n_train
+                })
+
+        Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+        state_dict = model.state_dict()
+        state_dict['mask_values'] = dataset.mask_values
+        torch.save(state_dict, str(checkpoint_dir))
+        logging.info(f'Checkpoint {epoch} saved!')
 
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
+    parser.add_argument('--epoch', '-e', metavar='E', type=int, default=5, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
@@ -185,6 +227,29 @@ def get_args():
 
 if __name__ == '__main__':
     args = get_args()
+
+    import torch.distributed as dist
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    rank = local_rank
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    device = torch.device("cuda:{}".format(rank))
+
+    wandb.login(
+        key="local-0b4dd77e45ad93ff68db22067d0d0f3ef9323636", 
+        host="http://115.27.161.208:8081/"
+    )
+    run = wandb.init(
+        project="unet",
+        entity="adminadmin",
+        config={
+            "learning_rate": args.lr,
+            "epochs": args.epoch,
+            "batch_size": args.b,
+        }
+    )
+
 
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -211,7 +276,7 @@ if __name__ == '__main__':
     try:
         train_model(
             model=model,
-            epochs=args.epochs,
+            epochs=args.epoch,
             batch_size=args.batch_size,
             learning_rate=args.lr,
             device=device,
@@ -227,7 +292,7 @@ if __name__ == '__main__':
         model.use_checkpointing()
         train_model(
             model=model,
-            epochs=args.epochs,
+            epochs=args.epoch,
             batch_size=args.batch_size,
             learning_rate=args.lr,
             device=device,

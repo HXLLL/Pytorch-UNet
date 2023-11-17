@@ -1,11 +1,8 @@
 #!/bin/bash
 
 if [[ ! -f ~/.kaggle/kaggle.json ]]; then
-  echo -n "Kaggle username: "
-  read USERNAME
-  echo
-  echo -n "Kaggle API key: "
-  read APIKEY
+  USENAME=pkuhxl
+  APIKEY=d8ba82b477fe48d2a3b029245dc0cf19
 
   mkdir -p ~/.kaggle
   echo "{\"username\":\"$USERNAME\",\"key\":\"$APIKEY\"}" > ~/.kaggle/kaggle.json
